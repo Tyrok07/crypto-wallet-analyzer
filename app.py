@@ -3,10 +3,9 @@ import pandas as pd
 import plotly.express as px
 import requests
 from typing import Dict, List
-import time
 
 # =============================================================================
-# CONFIG
+# CONFIG & API
 # =============================================================================
 SUPPORTED_CHAINS = {
     "eth": "Ethereum",
@@ -25,14 +24,16 @@ except KeyError:
     st.stop()
 
 BASE_URL = "https://deep-index.moralis.io/api/v2.2"
-HEADERS = {"Accept": "application/json", "X-API-Key": MORALIS_API_KEY}
-
+HEADERS = {
+    "Accept": "application/json",
+    "X-API-Key": MORALIS_API_KEY
+}
 
 # =============================================================================
 # API FONKSİYONLARI
 # =============================================================================
 def fetch_wallet_balance(address: str, chain: str) -> Dict[str, float]:
-    """Spam ve doğrulanmamış contract'leri hariç tutarak bakiye çeker."""
+    """Spam ve doğrulanmamış tokenleri hariç tutarak bakiye çeker."""
     balances = {}
     url = f"{BASE_URL}/wallets/{address}/tokens"
     
@@ -43,7 +44,7 @@ def fetch_wallet_balance(address: str, chain: str) -> Dict[str, float]:
     }
     
     try:
-        response = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        response = requests.get(url, headers=HEADERS, params=params, timeout=20)
         response.raise_for_status()
         data = response.json()
         
@@ -54,10 +55,8 @@ def fetch_wallet_balance(address: str, chain: str) -> Dict[str, float]:
             usd_value = token.get("usd_value")
             if usd_value and float(usd_value) > 0.1:
                 balances[symbol] = balances.get(symbol, 0) + round(float(usd_value), 2)
-    except requests.exceptions.RequestException as e:
-        st.error(f"Balance API hatası ({chain}): {str(e)}")
     except Exception as e:
-        st.error(f"Beklenmeyen hata: {str(e)}")
+        st.error(f"Balance sorgusunda hata ({chain}): {str(e)}")
     
     return balances
 
@@ -68,7 +67,7 @@ def fetch_wallet_transfers(address: str, chain: str) -> List[Dict]:
     params = {"chain": chain, "limit": 50}
     
     try:
-        response = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        response = requests.get(url, headers=HEADERS, params=params, timeout=20)
         response.raise_for_status()
         data = response.json().get("result", [])
         
@@ -98,21 +97,23 @@ def fetch_wallet_transfers(address: str, chain: str) -> List[Dict]:
 
 
 # =============================================================================
-# ANALİZ
+# ANALİZ MOTORU
 # =============================================================================
-def analyze_wallet_profile(transfers: List, balance: Dict) -> Dict:
+def analyze_wallet_profile(transfers: List, balance: Dict, chain: str) -> Dict:
     total_balance = sum(balance.values())
     tx_count = len(transfers)
+    chain_name = SUPPORTED_CHAINS.get(chain, chain.upper())
     
     if total_balance <= 0 and tx_count == 0:
         return {
-            "summary": "Bu cüzdanda seçilen ağda doğrulanmış piyasa değeri olan varlık veya transfer bulunamadı.",
+            "summary": f"Bu cüzdanda **{chain_name}** ağında doğrulanmış piyasa değeri olan varlık veya transfer bulunamadı.",
             "strategy_label": "Aktif Olmayan / Boş Cüzdan",
             "total_balance": 0,
             "df": pd.DataFrame(),
             "balance": balance
         }
     
+    # Strateji belirleme
     if total_balance > 100000:
         strategy = "🐳 Balina / Büyük Yatırımcı"
     elif total_balance > 20000:
@@ -127,7 +128,7 @@ def analyze_wallet_profile(transfers: List, balance: Dict) -> Dict:
         strategy = "Standart Cüzdan Kullanıcısı"
     
     summary = f"""
-    Bu cüzdanın **{SUPPORTED_CHAINS.get(chain, chain)}** ağındaki doğrulanmış portföy değeri **${total_balance:,.2f}**'dir. 
+    Bu cüzdanın **{chain_name}** ağındaki doğrulanmış portföy değeri **${total_balance:,.2f}**'dir. 
     Son dönemde **{tx_count}** adet onaylanmış transfer işlemi tespit edildi.
     """
     
@@ -141,25 +142,31 @@ def analyze_wallet_profile(transfers: List, balance: Dict) -> Dict:
 
 
 # =============================================================================
-# STREAMLIT UI
+# STREAMLIT ARAYÜZÜ
 # =============================================================================
 def main():
-    st.set_page_config(page_title="Cüzdan Analizörü", layout="wide", page_icon="🔍")
+    st.set_page_config(
+        page_title="Cüzdan Analizörü",
+        layout="wide",
+        page_icon="🔍"
+    )
+    
     st.title("🔍 Gerçek Zamanlı Cüzdan Analizörü")
-    st.markdown("**Moralis API** ile spam temizlenmiş, gerçek piyasa değeri olan portföy analizi")
+    st.markdown("**Moralis API v2.2** ile spam temizlenmiş, gerçek portföy analizi")
 
     with st.form("search_form"):
         col1, col2 = st.columns([3, 1])
         with col1:
             address = st.text_input(
                 "Cüzdan Adresi (0x...)", 
-                placeholder="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                placeholder="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                help="Ethereum, BSC, Polygon vb. adresleri destekler"
             )
         with col2:
             chain = st.selectbox(
-                "Blokzincir", 
+                "Blokzincir Ağ", 
                 options=list(SUPPORTED_CHAINS.keys()),
-                format_func=lambda x: f"{x.upper()} - {SUPPORTED_CHAINS[x]}"
+                format_func=lambda x: f"{x.upper()} — {SUPPORTED_CHAINS[x]}"
             )
         
         submitted = st.form_submit_button("🔎 Analiz Et", type="primary")
@@ -167,34 +174,34 @@ def main():
     if submitted and address:
         address = address.strip().lower()
         
-        with st.spinner("Veriler blokzincirden çekiliyor..."):
+        with st.spinner("Blokzincirden veriler çekiliyor... (Spam filtreleri aktif)"):
             balance = fetch_wallet_balance(address, chain)
             transfers = fetch_wallet_transfers(address, chain)
-            profile = analyze_wallet_profile(transfers, balance)
+            profile = analyze_wallet_profile(transfers, balance, chain)
         
-        # Session state'e kaydet
+        # Son analizi kaydet
         st.session_state.last_analysis = {
             "address": address,
             "chain": chain,
             "profile": profile
         }
-    
+
     # Önceki analizi göster
     if "last_analysis" in st.session_state:
         profile = st.session_state.last_analysis["profile"]
         chain = st.session_state.last_analysis["chain"]
         
-        # Metrikler
+        # Metrik Kartları
         c1, c2, c3 = st.columns(3)
-        c1.metric("Profil", profile["strategy_label"])
-        c2.metric("Toplam Değer", f"${profile['total_balance']:,.2f}")
-        c3.metric("Transfer Sayısı", len(profile["df"]))
+        c1.metric("Cüzdan Profili", profile["strategy_label"])
+        c2.metric("Toplam Portföy Değeri", f"${profile['total_balance']:,.2f}")
+        c3.metric("Transfer Sayısı", f"{len(profile['df'])} işlem")
         
         st.divider()
-        st.subheader("📋 Özet")
+        st.subheader("📋 Özet Rapor")
         st.markdown(profile["summary"])
         
-        # Portföy Pasta Grafiği
+        # Portföy Dağılımı
         st.subheader("🍰 Portföy Dağılımı")
         bal_df = pd.DataFrame({
             "Token": list(profile["balance"].keys()),
@@ -202,28 +209,36 @@ def main():
         })
         
         if not bal_df.empty and bal_df["Değer (USD)"].sum() > 0:
-            fig = px.pie(bal_df, names="Token", values="Değer (USD)", 
-                        title="Token Dağılımı")
-            st.plotly_chart(fig, use_container_width=True)
+            fig1 = px.pie(bal_df, names="Token", values="Değer (USD)", 
+                         title="Token Dağılımı")
+            st.plotly_chart(fig1, use_container_width=True)
         else:
             st.info("Bu cüzdanda piyasa değeri olan token bulunamadı.")
         
-        # Transfer Tablosu ve Grafikleri
+        # Transfer İşlemleri
         df = profile["df"]
         if not df.empty:
-            st.subheader("📊 Transfer İşlemleri")
-            st.dataframe(df.sort_values("datetime", ascending=False), use_container_width=True)
+            st.subheader("📊 Son Transfer İşlemleri")
+            st.dataframe(
+                df.sort_values("datetime", ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
             
-            col_g1, col_g2 = st.columns(2)
-            with col_g1:
-                fig2 = px.histogram(df, x="datetime", color="type", 
-                                  title="Zaman İçinde İşlem Aktivitesi")
+            col1, col2 = st.columns(2)
+            with col1:
+                fig2 = px.histogram(
+                    df, x="datetime", color="type",
+                    title="Zaman İçinde İşlem Aktivitesi"
+                )
                 st.plotly_chart(fig2, use_container_width=True)
             
-            with col_g2:
+            with col2:
                 vol_df = df.groupby(["token_symbol", "type"])["amount"].sum().reset_index()
-                fig3 = px.bar(vol_df, x="token_symbol", y="amount", color="type",
-                            title="Token Bazlı Hacim")
+                fig3 = px.bar(
+                    vol_df, x="token_symbol", y="amount", color="type",
+                    title="Token Bazlı Transfer Hacmi"
+                )
                 st.plotly_chart(fig3, use_container_width=True)
 
 if __name__ == "__main__":
