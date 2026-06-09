@@ -29,11 +29,10 @@ THRESHOLDS = {
     "volatility":       1.50,
 }
 
-# Streamlit Cloud panelinden secret'ı çekiyoruz
 try:
     MORALIS_API_KEY = st.secrets["MORALIS_API_KEY"]
 except KeyError:
-    st.error("HATA: Streamlit Secrets alanında 'MORALIS_API_KEY' bulunamadı. Lütfen Streamlit Cloud ayarlarından ekleyin.")
+    st.error("HATA: Streamlit Secrets alanında 'MORALIS_API_KEY' bulunamadı.")
     st.stop()
 
 BASE_URL = "https://deep-index.moralis.io/api/v2.2"
@@ -43,13 +42,13 @@ HEADERS = {
 }
 
 # =============================================================================
-# 2. %100 CANLI MORALIS API FONKSİYONLARI
+# 2. %100 GERÇEK VE FİLTRELENMİŞ API FONKSİYONLARI
 # =============================================================================
 
 def fetch_wallet_transfers(address: str, chain: str) -> List[Dict]:
-    """Cüzdanın canlı ERC20 token transfer geçmişini çeker."""
+    """Cüzdanın ERC20 transfer geçmişini çeker, sahte/fiyatsız tokenları eler."""
     url = f"{BASE_URL}/{address}/erc20/transfers"
-    params = {"chain": chain, "limit": 50} # Kota ve hız dostu son 50 işlem
+    params = {"chain": chain, "limit": 100}
     
     try:
         response = requests.get(url, headers=HEADERS, params=params)
@@ -70,23 +69,13 @@ def fetch_wallet_transfers(address: str, chain: str) -> List[Dict]:
             if amount <= 0:
                 continue
 
-            # PÜF NOKTASI: USD değeri boş gelse bile işlemi iptal etmiyoruz,
-            # popüler tokenlar için yaklaşık bir fiyat biçip analizin çalışmasını sağlıyoruz.
+            # KESİN FİLTRE: Eğer Moralis bu transfere gerçek bir USD değeri atamadıysa,
+            # bu muhtemelen değersiz/sahte bir tokendir. Analize dahil etmiyoruz!
             usd_val_raw = tx.get("usd_value")
             if usd_val_raw is not None and str(usd_val_raw).strip() != "":
                 value_usd = round(float(usd_val_raw), 2)
             else:
-                symbol = tx.get("token_symbol", "").upper()
-                if symbol in ["USDT", "USDC", "DAI", "BUSD"]:
-                    value_usd = round(amount, 2)
-                elif symbol in ["ETH", "WETH"]:
-                    value_usd = round(amount * 3500.0, 2)
-                elif symbol in ["BNB", "WBNB"]:
-                    value_usd = round(amount * 600.0, 2)
-                elif symbol in ["MATIC", "POL"]:
-                    value_usd = round(amount * 0.60, 2)
-                else:
-                    value_usd = round(amount * 1.50, 2) # Bilinmeyen altcoinler için taban piyasa değeri
+                continue  # Tahmini fiyatlama kaldırıldı, fiyatsızsa pas geç.
 
             transfers.append({
                 "tx_hash": tx.get("transaction_hash"),
@@ -105,47 +94,47 @@ def fetch_wallet_transfers(address: str, chain: str) -> List[Dict]:
 
 
 def fetch_wallet_balance(address: str, chain: str) -> Dict[str, float]:
-    """Cüzandaki ERC20 token bakiyelerini ve canlı değerlerini çeker."""
-    url = f"{BASE_URL}/{address}/erc20"
-    params = {"chain": chain}
+    """Cüzandaki sadece GERÇEK USD DEĞERİ olan ERC20 ve Native (Ana) varlıkları çeker."""
+    balances = {}
     
+    # 1. ADIM: Native Bakiye Çekimi (ETH, BNB vb.)
     try:
-        response = requests.get(url, headers=HEADERS, params=params)
-        if response.status_code != 200:
-            return {}
-        
-        data = response.json()
-        balances = {}
-        
-        for token in data:
-            symbol = token.get("symbol", "UNKNOWN")
-            usd_value = token.get("usd_value")
-            
-            if usd_value and float(usd_value) > 0.01:
-                balances[symbol] = round(float(usd_value), 2)
-            else:
-                # API USD değerini boş dönerse cüzdanın boş kalmaması için ham miktarı alıp fiyatlandırıyoruz
-                decimals = int(token.get("decimals", 18))
-                balance_raw = int(token.get("balance", 0))
-                amount = balance_raw / (10 ** decimals)
-                
-                if amount > 0.01:
-                    if symbol in ["USDT", "USDC", "DAI"]:
-                        balances[symbol] = round(amount, 2)
-                    elif symbol in ["ETH", "WETH"]:
-                        balances[symbol] = round(amount * 3500.0, 2)
-                    elif symbol in ["BNB", "WBNB"]:
-                        balances[symbol] = round(amount * 600.0, 2)
-                    else:
-                        balances[symbol] = round(amount * 2.5, 2)
-                        
-        return balances
+        native_url = f"{BASE_URL}/{address}/balance"
+        native_res = requests.get(native_url, headers=HEADERS, params={"chain": chain})
+        if native_res.status_code == 200:
+            n_data = native_res.json()
+            # Bazı Moralis sürümlerinde native bakiyenin de usd değeri doğrudan gelir
+            n_usd = n_data.get("usd_value")
+            if n_usd and float(n_usd) > 0.5:
+                # Ağın ana coini (ETH, BNB vb.) ismiyle ekleyelim
+                chain_main_tokens = {"eth": "ETH", "bsc": "BNB", "polygon": "POL/MATIC", "arbitrum": "ETH (Arb)", "optimism": "ETH (Op)", "base": "ETH (Base)"}
+                symbol = chain_main_tokens.get(chain, "NATIVE")
+                balances[symbol] = round(float(n_usd), 2)
     except Exception:
-        return {}
+        pass
+
+    # 2. ADIM: ERC20 Token Bakiyeleri
+    try:
+        url = f"{BASE_URL}/{address}/erc20"
+        response = requests.get(url, headers=HEADERS, params={"chain": chain})
+        if response.status_code == 200:
+            data = response.json()
+            for token in data:
+                symbol = token.get("symbol", "UNKNOWN")
+                usd_value = token.get("usd_value")
+                
+                # KESİN FİLTRE: Sadece Moralis tarafından doğrulanmış gerçek USD değeri olan tokenlar
+                if usd_value and float(usd_value) > 0.5:
+                    # Aynı sembolden varsa (örn hem native hem erc20) üst üste binmesin
+                    balances[symbol] = balances.get(symbol, 0) + round(float(usd_value), 2)
+    except Exception:
+        pass
+                
+    return balances
 
 
 def calculate_dynamic_metrics(transfers: List[Dict]) -> Dict[str, float]:
-    """Transfer geçmişinden cüzdan hacmini hesaplar."""
+    """Gerçek transfer geçmişinden cüzdan hacmini hesaplar."""
     if not transfers:
         return {"total_in_usd": 0, "total_out_usd": 0, "net_flow_usd": 0, "total_tx": 0}
         
@@ -165,61 +154,47 @@ def calculate_dynamic_metrics(transfers: List[Dict]) -> Dict[str, float]:
 
 def analyze_wallet_profile(transfers, balance, metrics, chain: str) -> Dict:
     df = pd.DataFrame(transfers)
+    total_balance = sum(balance.values())
 
-    if df.empty:
+    if df.empty and total_balance <= 0:
         return {
-            "summary":        "Bu cüzdanın seçilen ağda güncel bir ERC20 transfer hareketi bulunamadı.",
+            "summary":        "Bu cüzdanın seçilen ağda doğrulanmış, piyasa değeri olan aktif bir varlığı veya transferi bulunamadı.",
             "traits":         [],
-            "strategy_label": "Bilinmiyor / Pasif",
-            "risk_label":     "Bilinmiyor",
+            "strategy_label": "Pasif / İzleyici Cüzdan",
+            "risk_label":     "Düşük Risk (Hareketsiz)",
             "df":             df,
             "balance":        balance,
             "metrics":        metrics,
         }
 
     swap_count = metrics["total_tx"]
-    ts_range  = df["timestamp"].max() - df["timestamp"].min()
-    day_range = max(ts_range / 86_400, 1)
-    avg_tx_per_day = round(swap_count / day_range, 2)
-    token_count = df["token_symbol"].nunique()
-
-    mean_value = df["value_usd"].mean()
-    std_value  = df["value_usd"].std() if len(df) > 1 else 0
-
-    total_balance = sum(balance.values())
+    token_count = df["token_symbol"].nunique() if not df.empty else 0
     share_top     = max(balance.values()) / total_balance if total_balance > 0 else 0
 
-    T = THRESHOLDS
-    if swap_count > T["bot_freq"] and std_value > mean_value * 2:
-        strategy_label = "Bot / MEV / Arbitraj"
-    elif swap_count > T["high_freq"] and token_count > 5:
-        strategy_label = "Aktif Kısa Vadeli Trader"
-    elif total_balance > T["hodl_balance_usd"] and swap_count <= 10:
+    # Strateji tespiti
+    if total_balance > THRESHOLDS["hodl_balance_usd"] and swap_count <= 5:
         strategy_label = "HODL / Balina Yatırımcı"
+    elif swap_count > THRESHOLDS["high_freq"]:
+        strategy_label = "Aktif Kısa Vadeli Trader"
+    elif swap_count > 0:
+        strategy_label = "Standart DeFi Kullanıcısı"
     else:
-        strategy_label = "Bireysel / Düzenli Kullanıcı"
+        strategy_label = "Sadece HODL (İşlemsiz)"
 
-    if share_top > T["concentration"]:
-        risk_label = "Yüksek Risk (Tek Varlık Yoğunluğu)"
-    elif std_value > mean_value * T["volatility"]:
-        risk_label = "Yüksek Risk (Yüksek Volatilite)"
-    else:
-        risk_label = "Düşük/Orta Risk (Dengeli)"
+    risk_label = "Yüksek Risk (Yoğunlaşma)" if share_top > THRESHOLDS["concentration"] else "Düşük/Orta Risk (Dengeli)"
 
     parts = [
-        f"Bu cüzdan on-chain cüzdan hareketlerine göre **{strategy_label}** profilindedir.",
-        f"Son hareketlerinde toplam **{swap_count}** adet transfer saptandı.",
-        f"Cüzdana giren toplam hacim **${metrics['total_in_usd']:,.2f}**, çıkan toplam hacim ise **${metrics['total_out_usd']:,.2f}**.",
-        f"Net cüzdan sermaye akışı: **${metrics['net_flow_usd']:,.2f}**."
+        f"Bu cüzdan on-chain hareketlerine göre **{strategy_label}** profilindedir.",
+        f"Cüzdanda şu an doğrulanmış toplam **${total_balance:,.2f}** değerinde varlık bulunuyor.",
+        f"İncelenen son dönemde piyasa değeri net olan **{swap_count}** adet transfer işlemi tespit edildi."
     ]
 
     summary = " ".join(parts)
-
     traits = [
-        f"Günlük Ortalama İşlem: {avg_tx_per_day} tx",
-        f"Etkileşimdeki Farklı Token: {token_count} adet",
-        f"En Büyük Varlık Konsantrasyonu: %{share_top*100:.1f}",
-        f"Risk Grubu: {risk_label}"
+        f"Toplam Gerçek Hacim Verisi: {swap_count} tx",
+        f"Farklı Gerçek Token Etkileşimi: {token_count} adet",
+        f"En Büyük Varlık Oranı: %{share_top*100:.1f}",
+        f"Güncel Risk Durumu: {risk_label}"
     ]
 
     return {
@@ -232,7 +207,6 @@ def analyze_wallet_profile(transfers, balance, metrics, chain: str) -> Dict:
         "metrics":        metrics,
     }
 
-
 # =============================================================================
 # 4. STREAMLIT UI (ARAYÜZ)
 # =============================================================================
@@ -242,16 +216,13 @@ def main():
 
     st.title("🔍 Canlı Kripto Cüzdan Analizörü")
     st.markdown(
-        "Moralis API kullanarak **gerçek zamanlı** on-chain verileri listeler. USD karşılığı hesaplanamayan tokenlar otomatik olarak taban fiyattan işlenir."
+        "Moralis API ile **%100 Gerçek ve Doğrulanmış** veriler listelenir. Fiyatı olmayan spam/airdrop tokenlar otomatik elenir."
     )
 
     with st.form("search_form"):
         col1, col2 = st.columns([3, 1])
         with col1:
-            address = st.text_input(
-                "Cüzdan Adresi (0x...)",
-                placeholder="Örn: 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            )
+            address = st.text_input("Cüzdan Adresi (0x...)", placeholder="Örn: 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
         with col2:
             chain_options = [f"{code} ({name})" for code, name in SUPPORTED_CHAINS]
             chain_str     = st.selectbox("Blokzincir Ağ Seçimi", chain_options)
@@ -260,15 +231,14 @@ def main():
         submit_button = st.form_submit_button("Canlı Verileri Sorgula", type="primary")
 
     if not address:
-        st.info("Lütfen analiz etmek istediğiniz bir EVM adresi girin (Örn: Vitalik Buterin cüzdanı yukarıda yer almaktadır).")
+        st.info("Analiz için geçerli bir cüzdan adresi girin.")
         return
 
     cache_key = f"{address.strip()}:{chain}"
 
-    # Eski cache verilerinden kurtulmak için güvenlik önlemi
     if submit_button or st.session_state.get("cache_key") == cache_key:
         if submit_button:
-            with st.spinner("Blokzincir ağından veriler canlı olarak çekiliyor..."):
+            with st.spinner("Blokzincir ağından sadece gerçek piyasa verileri süzülüyor..."):
                 transfers = fetch_wallet_transfers(address.strip(), chain)
                 balance   = fetch_wallet_balance(address.strip(), chain)
                 metrics   = calculate_dynamic_metrics(transfers)
@@ -278,11 +248,6 @@ def main():
             st.session_state["profile"]   = profile
         else:
             profile = st.session_state.get("profile")
-            # Eski kod kırıntısı kalmışsa temizle
-            if profile and "metrics" not in profile:
-                st.session_state["profile"] = None
-                profile = None
-                st.rerun()
 
         if not profile:
             return
@@ -292,12 +257,11 @@ def main():
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Hesaplanan Strateji", profile["strategy_label"])
         m2.metric("Risk Durumu",         profile["risk_label"])
-        m3.metric("Toplam Canlı Varlık", f"${sum(profile['balance'].values()):,.2f}")
+        m3.metric("Toplam Gerçek Varlık", f"${sum(profile['balance'].values()):,.2f}")
         m4.metric("Net Giriş/Çıkış Dengesi", f"${m['net_flow_usd']:,.2f}")
 
         st.divider()
 
-        # --- Özet ---
         st.subheader("📋 Canlı Hesaplama Özeti")
         st.markdown(profile["summary"])
 
@@ -311,45 +275,23 @@ def main():
             st.subheader("📈 Gerçek Transfer İşlemleri Zaman Serisi")
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="s")
             fig = px.scatter(
-                df,
-                x="datetime",
-                y="value_usd",
-                color="type",
-                hover_data=["token_symbol", "amount"],
-                title="İşlem Hacimleri Grafiği (USD)",
-                labels={"datetime": "Zaman", "value_usd": "Hacim (USD)"}
+                df, x="datetime", y="value_usd", color="type",
+                hover_data=["token_symbol", "amount"], title="İşlem Hacimleri Grafiği (USD)"
             )
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("📊 En Çok Transfer Edilen Token Hacimleri")
-            vol_df = (
-                df.groupby("token_symbol")["value_usd"]
-                .sum()
-                .reset_index()
-                .sort_values("value_usd", ascending=False)
-                .head(10)
-            )
-            fig2 = px.bar(
-                vol_df, 
-                x="token_symbol", 
-                y="value_usd", 
-                title="Token Bazlı Kümülatif Transfer Dağılımı",
-                labels={"token_symbol": "Token", "value_usd": "Hacim (USD)"}
-            )
+            vol_df = df.groupby("token_symbol")["value_usd"].sum().reset_index().sort_values("value_usd", ascending=False).head(10)
+            fig2 = px.bar(vol_df, x="token_symbol", y="value_usd", title="Token Bazlı Kümülatif Transfer Dağılımı")
             st.plotly_chart(fig2, use_container_width=True)
 
-        # --- Portföy Pasta Grafiği ---
         st.subheader("🍰 Güncel Portföy Varlık Dağılımı")
-        bal_df = pd.DataFrame({
-            "token":       list(profile["balance"].keys()),
-            "balance_usd": list(profile["balance"].values()),
-        })
+        bal_df = pd.DataFrame({"token": list(profile["balance"].keys()), "balance_usd": list(profile["balance"].values())})
         if not bal_df.empty and bal_df["balance_usd"].sum() > 0:
             fig3 = px.pie(bal_df, names="token", values="balance_usd", title="Tokenların Portföy Oranları")
             st.plotly_chart(fig3, use_container_width=True)
         else:
-            st.info("Bu cüzdanda listelenebilecek bir ERC20 token bakiyesi tespit edilemedi.")
-
+            st.info("Bu cüzdanda piyasa değeri saptanabilen bir varlık bulunamadı.")
 
 if __name__ == "__main__":
     main()
