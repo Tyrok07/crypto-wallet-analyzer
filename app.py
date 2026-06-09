@@ -6,7 +6,7 @@ import streamlit as st
 st.set_page_config(page_title="Blokzincir İşlem Takipçisi", layout="wide")
 st.title("🔗 Çoklu Ağ (Ethereum & Solana) İşlem Takip Paneli")
 st.caption(
-    "Etherscan ve Solscan API'lerini kullanarak adres geçmişini listeler."
+    "Etherscan ve Solscan API'lerini kullanarak güvenli bir şekilde adres geçmişini listeler."
 )
 
 # Streamlit Secrets üzerinden API anahtarlarını güvenli bir şekilde çekme
@@ -15,12 +15,12 @@ try:
     SOLSCAN_KEY = st.secrets["SOLSCAN_API_KEY"]
 except KeyError:
     st.error(
-        "Hata: API anahtarları `.streamlit/secrets.toml` dosyasında bulunamadı!"
+        "Hata: API anahtarları `.streamlit/secrets.toml` veya Streamlit Cloud ayarlarında bulunamadı!"
     )
     st.stop()
 
 
-# --- ETHEREUM İŞLEM FONKSİYONU ---
+# --- ETHEREUM İŞLEM FONKSiyonu (Güvenli Versiyon) ---
 def get_ethereum_tx(address):
     url = "https://etherscan.io"
     params = {
@@ -30,22 +30,59 @@ def get_ethereum_tx(address):
         "startblock": 0,
         "endblock": 99999999,
         "page": 1,
-        "offset": 10,  # Son 10 işlem
+        "offset": 10,
         "sort": "desc",
         "apikey": ETHERSCAN_KEY,
     }
-    response = requests.get(url, params=params).json()
-    return response
+
+    # Streamlit Cloud'un bot korumalarına (Cloudflare) takılmasını önlemek için tarayıcı başlığı
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(
+            url, params=params, headers=headers, timeout=15
+        )
+
+        # HTTP Hata kodu kontrolü
+        if response.status_code != 200:
+            return {
+                "status": "0",
+                "message": f"Etherscan sunucusu HTTP {response.status_code} hatası döndürdü. Lütfen daha sonra tekrar deneyin.",
+            }
+
+        # JSON ayrıştırma doğrulaması
+        return response.json()
+
+    except requests.exceptions.JSONDecodeError:
+        return {
+            "status": "0",
+            "message": "Etherscan API'sinden geçersiz veri (HTML) alındı. Streamlit Cloud IP adresi engellenmiş veya API anahtarınız hatalı olabilir.",
+        }
+    except requests.exceptions.RequestException as e:
+        return {"status": "0", "message": f"Bağlantı hatası oluştu: {str(e)}"}
 
 
 # --- SOLANA İŞLEM FONKSİYONU ---
 def get_solana_tx(address):
-    # Solscan Pro API v2 güncel uç noktası
-    url = "https://pro-api.solscan.io/v2.0/account/transactions"
+    url = "https://solscan.io"
     params = {"account": address, "limit": 10}
-    headers = {"token": SOLSCAN_KEY}  # Solscan yetkilendirme başlığı
-    response = requests.get(url, params=params, headers=headers).json()
-    return response
+    headers = {
+        "token": SOLSCAN_KEY,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return {
+                "status": "error",
+                "message": f"Solscan sunucusu HTTP {response.status_code} hatası döndürdü.",
+            }
+        return response.json()
+    except Exception as e:
+        return {"status": "error", "message": f"Bağlantı hatası: {str(e)}"}
 
 
 # --- KULLANICI ARAYÜZÜ (UI) ---
@@ -91,7 +128,7 @@ if st.button("İşlemleri Getir"):
                                 )
                 else:
                     st.error(
-                        f"Etherscan Hatası: {data.get('message', 'Bilinmeyen hata')}"
+                        f"Hata Açıklaması: {data.get('message', 'Bilinmeyen hata')}"
                     )
 
         # --- SOLANA SORGUSU ---
@@ -99,7 +136,6 @@ if st.button("İşlemleri Getir"):
             with st.spinner("Solana ağı sorgulanıyor..."):
                 data = get_solana_tx(target_address)
 
-                # Solscan Pro API yanıt yapısı kontrolü
                 if "data" in data:
                     tx_list = data.get("data", [])
                     st.success(
@@ -107,7 +143,6 @@ if st.button("İşlemleri Getir"):
                     )
 
                     for idx, tx in enumerate(tx_list, 1):
-                        # Solscan API tipik olarak 'block_time' veya 'time' döner
                         b_time = tx.get("block_time", tx.get("time"))
                         dt = (
                             datetime.datetime.fromtimestamp(int(b_time))
@@ -124,7 +159,6 @@ if st.button("İşlemleri Getir"):
                                 st.write(
                                     f"**Durum:** `{tx.get('status', 'N/A')}`"
                                 )
-                                # Solana işlemlerinde gas ücreti lamports cinsindendir (1 SOL = 10^9 Lamports)
                                 fee_sol = (
                                     float(tx.get("fee", 0)) / 10**9
                                     if tx.get("fee")
